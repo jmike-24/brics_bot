@@ -1,6 +1,5 @@
 """
 Design Team Task Management Telegram Bot
-Structured workflow for SMM managers, designers, and head of design.
 """
 
 import logging
@@ -556,7 +555,7 @@ async def cmd_mytasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         text += format_task_short(t) + "\n"
         if (role == UserRole.DESIGNER or (role == UserRole.HEAD_OF_DESIGN and t.assignee_id == u.id)) and t.status in (TaskStatus.IN_PROGRESS, TaskStatus.REVISION):
             text += f"   /done {t.id}\n"
-    text += "\n_Filter: /mytasks новые | в процессе | отправлена на проверку | проверка | сделано_"
+    text += "\n_Filter: /mytasks новые | в процессе | отправлено на проверку | проверка | сделано_"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -694,7 +693,7 @@ async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if len(args) < 2:
         await update.message.reply_text(
             "Используй: /setrole <user_id> <role>\n"
-            "Роли: smm_manager, designer, head_of_design\n"
+            "Роли: CMM, Дизайнер, Глава дизайна\n"
             "Пример: /setrole 123456789 designer"
         )
         return
@@ -703,7 +702,7 @@ async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         role_str = args[1].lower()
         role = UserRole(role_str)
     except (ValueError, KeyError):
-        await update.message.reply_text("Invalid role. Use: smm_manager, designer, head_of_design")
+        await update.message.reply_text("Invalid role. Use: CMM, Дизайнер, Глава дизайна")
         return
     db.ensure_user(telegram_id, None, "Unknown")
     db.set_user_role(telegram_id, role)

@@ -12,18 +12,18 @@ from enum import Enum
 
 
 class TaskStatus(str, Enum):
-    NEW = "New"
-    IN_PROGRESS = "In Progress"
-    ON_REVIEW = "On Review"
-    REVISION = "Revision"
-    DONE = "Done"
+    NEW = "новые"
+    IN_PROGRESS = "в процессе"
+    ON_REVIEW = "отправлено на проверку"
+    REVISION = "проверка"
+    DONE = "сделано"
     CANCELLED = "Cancelled"
 
 
 class UserRole(str, Enum):
-    SMM_MANAGER = "smm_manager"
-    DESIGNER = "designer"
-    HEAD_OF_DESIGN = "head_of_design"
+    SMM_MANAGER = "СММ"
+    DESIGNER = "Дизайнер"
+    HEAD_OF_DESIGN = "Глава дизайна"
 
 
 @dataclass
