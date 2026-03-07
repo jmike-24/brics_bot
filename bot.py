@@ -532,9 +532,9 @@ async def cmd_mytasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         u = db.get_user_by_telegram_id(user.id)
     role = db.get_user_role(user.id)
     status_filter = None
-    _status_map = {"новые": TaskStatus.NEW, "в процессе": TaskStatus.IN_PROGRESS, "в процессе": TaskStatus.IN_PROGRESS,
-                   "на проверке": TaskStatus.ON_REVIEW, "отправлена на проверку": TaskStatus.ON_REVIEW, "проверка": TaskStatus.REVISION,
-                   "сделано": TaskStatus.DONE, "отклонена": TaskStatus.CANCELLED}
+    _status_map = {"New": TaskStatus.NEW, "In Progress": TaskStatus.IN_PROGRESS, "In Progress": TaskStatus.IN_PROGRESS,
+                   "On Review": TaskStatus.ON_REVIEW, "On Review": TaskStatus.ON_REVIEW, "Revision": TaskStatus.REVISION,
+                   "Done": TaskStatus.DONE, "Cancelled": TaskStatus.CANCELLED}
     if context.args:
         key = context.args[0].lower().replace(" ", "_").replace("-", "_")
         status_filter = _status_map.get(key)
@@ -555,7 +555,7 @@ async def cmd_mytasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         text += format_task_short(t) + "\n"
         if (role == UserRole.DESIGNER or (role == UserRole.HEAD_OF_DESIGN and t.assignee_id == u.id)) and t.status in (TaskStatus.IN_PROGRESS, TaskStatus.REVISION):
             text += f"   /done {t.id}\n"
-    text += "\n_Filter: /mytasks новые | в процессе | отправлено на проверку | проверка | сделано_"
+    text += "\n_Filter: /mytasks New | In Progress | On Review | Revision | Done"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -693,7 +693,7 @@ async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if len(args) < 2:
         await update.message.reply_text(
             "Используй: /setrole <user_id> <role>\n"
-            "Роли: CMM, Дизайнер, Глава дизайна\n"
+            "Роли: smm_manager, designer, head_of_design\n"
             "Пример: /setrole 123456789 designer"
         )
         return
@@ -702,7 +702,7 @@ async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         role_str = args[1].lower()
         role = UserRole(role_str)
     except (ValueError, KeyError):
-        await update.message.reply_text("Invalid role. Use: CMM, Дизайнер, Глава дизайна")
+        await update.message.reply_text("Invalid role. Use: smm_manager, designer, head_of_design")
         return
     db.ensure_user(telegram_id, None, "Unknown")
     db.set_user_role(telegram_id, role)
