@@ -71,7 +71,9 @@ def format_task(task: Task, include_result: bool = False) -> str:
         assignee_name = assignee.full_name if assignee else "Unknown"
         text += f"👤 Исполнитель: {assignee_name}\n"
     if include_result and task.result_link:
-        text += f"\n🎨 Результат: {task.result_link}\n"
+        ft, _ = parse_result_file(task.result_link)
+        res_label = "Прикреплено изображение" if ft == "photo" else "Прикреплён документ" if ft == "document" else task.result_link
+        text += f"\n🎨 Результат: {res_label}\n"
     if task.revision_comment:
         text += f"\n💬 Комментарий: {task.revision_comment}\n"
     return text
@@ -93,6 +95,22 @@ async def notify_users(context: ContextTypes.DEFAULT_TYPE, telegram_ids: list[in
             )
         except Exception as e:
             logger.warning(f"Не могу отправить сообщение пользователю {uid}: {e}")
+
+
+def parse_result_file(result_link: Optional[str]) -> tuple[str | None, str | None]:
+    """Parse result_link: returns (type, file_id) for PHOTO:/DOC: or legacy format, else (None, None)."""
+    if not result_link or ":" not in result_link:
+        return None, None
+    prefix, _, rest = result_link.partition(":")
+    if prefix == "PHOTO" and rest:
+        return "photo", rest.strip()
+    if prefix == "DOC" and rest:
+        return "document", rest.strip()
+    if "file_id:" in result_link.lower():
+        fid = result_link.split("file_id:", 1)[-1].strip().split()[0].rstrip("…")
+        if fid and len(fid) > 15:
+            return "photo", fid
+    return None, None
 
 
 # ============== Role checks ==============
@@ -154,22 +172,24 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text += "/mytasks — Можешь посмотреть свои задачки\n"
     text += "/opentasks — Можешь посмотреть новые задачки (их еще не взяли)\n"
     if role == UserRole.SMM_MANAGER:
-        text += "\n*Глашатай (Эс Эм ЭМ):*\n"
+        text += "\n*Глашатай (СММ):*\n"
         text += "/newtask — Создать задачку\n"
-        text += "/edittask — Редактировать задачку (если ее никто еще не взял)\n"
-        text += "/mytasks — Созданные задачки\n"
-        text += "/canceltask — Отменить задачку (если ее никто еще не взял)\n"
+        text += "/edittask — Редактировать задачку (если её ещё не взяли)\n"
+        text += "/mytasks — Все созданные задачи\n"
+        text += "/canceltask — Отменить задачку (если её ещё не взяли)\n"
     elif role == UserRole.DESIGNER:
         text += "\n*Рисовальшик (Дезигнер):*\n"
         text += "/opentasks — Взять задачку (кнопка ниже)\n"
         text += "/done — Сдать задачку на проверку\n"
     elif role == UserRole.HEAD_OF_DESIGN:
         text += "\n*Самый главный:*\n"
+        text += "/newtask — Создать задачку\n"
         text += "/opentasks — Взять задачку (как дизайнер)\n"
         text += "/done — Сдать задачку на проверку\n"
         text += "/review — Задачки на согласование\n"
     if update.effective_user and update.effective_user.id == ADMIN_USER_ID:
         text += "\n*Админ:*\n"
+        text += "/users — Список пользователей (username — роль)\n"
         text += "/setrole — Назначить роль\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -178,8 +198,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def newtask_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     role = db.get_user_role(update.effective_user.id)
-    if role != UserRole.SMM_MANAGER:
-        await update.message.reply_text("❌ Только СММ может давать задачи")
+    if role not in (UserRole.SMM_MANAGER, UserRole.HEAD_OF_DESIGN):
+        await update.message.reply_text("❌ Только СММ и глава дизайна могут создавать задачи")
         return ConversationHandler.END
     await update.message.reply_text(
         "📝 *Сделать задачу*\n\n"
@@ -389,9 +409,11 @@ async def receive_result_or_revision(update: Update, context: ContextTypes.DEFAU
 async def _process_result(update: Update, context: ContextTypes.DEFAULT_TYPE, task_id: int) -> None:
     result = update.message.text or ""
     if update.message.photo:
-        result = f"[Photo] file_id: {update.message.photo[-1].file_id}"
+        file_id = update.message.photo[-1].file_id
+        result = f"PHOTO:{file_id}"
     elif update.message.document:
-        result = f"[Document] {update.message.document.file_name or 'file'}"
+        file_id = update.message.document.file_id
+        result = f"DOC:{file_id}"
     if not result.strip():
         await update.message.reply_text("Я ж попросил: изображение, документ или ссылку")
         return
@@ -403,10 +425,11 @@ async def _process_result(update: Update, context: ContextTypes.DEFAULT_TYPE, ta
     user = db.get_user_by_telegram_id(update.effective_user.id)
     if not user or task.assignee_id != user.id:
         await update.message.reply_text("Это не твоя задача")
-    if task.status not in (TaskStatus.IN_PROGRESS, TaskStatus.REVISION):
-        await update.message.reply_text("Задчача не в процессе и не на расмотрении.")
         return
-    db.submit_for_review(task_id, result[:500])
+    if task.status not in (TaskStatus.IN_PROGRESS, TaskStatus.REVISION):
+        await update.message.reply_text("Задача не в процессе и не на рассмотрении.")
+        return
+    db.submit_for_review(task_id, result[:600])
     task = db.get_task(task_id)
     await update.message.reply_text(
         f"✅ Задача #{task_id} отправлена на согласование!\n\n{format_task(task)}",
@@ -414,11 +437,17 @@ async def _process_result(update: Update, context: ContextTypes.DEFAULT_TYPE, ta
     )
     # Notify Head
     heads = db.get_users_by_role(UserRole.HEAD_OF_DESIGN)
-    msg = (
-        f"🔍 *Задача #{task_id}* готова к проверки, начальник\n\n"
-        f"Собственно: {result[:200]}..."
-    )
-    await notify_users(context, [h.telegram_id for h in heads], msg)
+    msg = f"🔍 *Задача #{task_id}* готова к проверке.\nИспользуй /review чтобы посмотреть."
+    for h in heads:
+        try:
+            await context.bot.send_message(chat_id=h.telegram_id, text=msg, parse_mode="Markdown")
+            file_type, file_id = parse_result_file(result)
+            if file_type == "photo" and file_id:
+                await context.bot.send_photo(chat_id=h.telegram_id, photo=file_id, caption=f"Задача #{task_id}")
+            elif file_type == "document" and file_id:
+                await context.bot.send_document(chat_id=h.telegram_id, document=file_id, caption=f"Задача #{task_id}")
+        except Exception as e:
+            logger.warning(f"Не удалось уведомить Head {h.telegram_id}: {e}")
 
 
 async def _process_revision_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, task_id: int) -> None:
@@ -465,20 +494,41 @@ async def cmd_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     tasks = db.get_tasks(status=TaskStatus.ON_REVIEW)
     if not tasks:
-        await update.message.reply_text("📭 Нет задач не согласовании")
+        await update.message.reply_text("📭 Нет задач на согласовании")
         return
     for t in tasks:
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Все супер!", callback_data=f"approve_{t.id}"),
-                InlineKeyboardButton("🔄 Правки", callback_data=f"revision_{t.id}")
-            ]
-        ]
-        await update.message.reply_text(
-            format_task(t, include_result=True),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        file_type, file_id = parse_result_file(t.result_link)
+        if file_type == "photo" and file_id:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=file_id,
+                caption=format_task(t, include_result=False) + "\n\n🎨 Результат — выше",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Все супер!", callback_data=f"approve_{t.id}"),
+                    InlineKeyboardButton("🔄 Правки", callback_data=f"revision_{t.id}")
+                ]])
+            )
+        elif file_type == "document" and file_id:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=file_id,
+                caption=format_task(t, include_result=False) + "\n\n🎨 Результат — выше",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Все супер!", callback_data=f"approve_{t.id}"),
+                    InlineKeyboardButton("🔄 Правки", callback_data=f"revision_{t.id}")
+                ]])
+            )
+        else:
+            await update.message.reply_text(
+                format_task(t, include_result=True),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Все супер!", callback_data=f"approve_{t.id}"),
+                    InlineKeyboardButton("🔄 Правки", callback_data=f"revision_{t.id}")
+                ]])
+            )
 
 
 async def callback_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -493,18 +543,38 @@ async def callback_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not task or task.status != TaskStatus.ON_REVIEW:
         await query.edit_message_text("Задача не найдена или уже отсмотрена")
         return
+    result_link = task.result_link
     db.approve_task(task_id)
     task = db.get_task(task_id)
-    await query.edit_message_text(
-        f"✅ Задача #{task_id} согласована!\n\n{format_task(task)}",
-        parse_mode="Markdown"
-    )
-    # Notify SMM and Designer
+    try:
+        await query.edit_message_caption(caption=f"✅ Задача #{task_id} согласована!")
+    except Exception:
+        try:
+            await query.edit_message_text(f"✅ Задача #{task_id} согласована!")
+        except Exception:
+            pass
+    # Отправить файл SMM и уведомить дизайнера
     creator_tg = db.get_creator_telegram_id(task.creator_id)
     assignee_tg = db.get_assignee_telegram_id(task.assignee_id) if task.assignee_id else None
-    to_notify = list({t for t in [creator_tg, assignee_tg] if t})
+    file_type, file_id = parse_result_file(result_link)
+    if creator_tg and file_type and file_id:
+        try:
+            if file_type == "photo":
+                await context.bot.send_photo(
+                    chat_id=creator_tg,
+                    photo=file_id,
+                    caption=f"✅ Согласованный макет по задаче #{task_id}\n\n{task.title}"
+                )
+            elif file_type == "document":
+                await context.bot.send_document(
+                    chat_id=creator_tg,
+                    document=file_id,
+                    caption=f"✅ Согласованный макет по задаче #{task_id}\n\n{task.title}"
+                )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить файл SMM: {e}")
     msg = f"✅ *Задача #{task_id}* согласована и отправлена SMM!"
-    await notify_users(context, to_notify, msg)
+    await notify_users(context, [t for t in [creator_tg, assignee_tg] if t], msg)
 
 
 async def callback_revision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -532,14 +602,14 @@ async def cmd_mytasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         u = db.get_user_by_telegram_id(user.id)
     role = db.get_user_role(user.id)
     status_filter = None
-    _status_map = {"New": TaskStatus.NEW, "In Progress": TaskStatus.IN_PROGRESS, "In Progress": TaskStatus.IN_PROGRESS,
-                   "On Review": TaskStatus.ON_REVIEW, "On Review": TaskStatus.ON_REVIEW, "Revision": TaskStatus.REVISION,
-                   "Done": TaskStatus.DONE, "Cancelled": TaskStatus.CANCELLED}
+    _status_map = {"новые": TaskStatus.NEW, "в процессе": TaskStatus.IN_PROGRESS, "в процессе": TaskStatus.IN_PROGRESS,
+                   "на проверке": TaskStatus.ON_REVIEW, "отправлена на проверку": TaskStatus.ON_REVIEW, "проверка": TaskStatus.REVISION,
+                   "сделано": TaskStatus.DONE, "отклонена": TaskStatus.CANCELLED}
     if context.args:
         key = context.args[0].lower().replace(" ", "_").replace("-", "_")
         status_filter = _status_map.get(key)
     if role == UserRole.SMM_MANAGER:
-        tasks = db.get_tasks(creator_id=u.id, status=status_filter)
+        tasks = db.get_tasks(status=status_filter)
     elif role == UserRole.DESIGNER:
         tasks = db.get_tasks(assignee_id=u.id, status=status_filter)
     elif role == UserRole.HEAD_OF_DESIGN:
@@ -555,7 +625,7 @@ async def cmd_mytasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         text += format_task_short(t) + "\n"
         if (role == UserRole.DESIGNER or (role == UserRole.HEAD_OF_DESIGN and t.assignee_id == u.id)) and t.status in (TaskStatus.IN_PROGRESS, TaskStatus.REVISION):
             text += f"   /done {t.id}\n"
-    text += "\n_Filter: /mytasks New | In Progress | On Review | Revision | Done"
+    text += "\n_Filter: /mytasks новые | в процессе | отправлено на проверку | проверка | сделано_"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -683,6 +753,52 @@ async def cmd_canceltask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ Можно отменять только те задачи, которые отменены")
 
 
+# ============== Deadline notifications (Job) ==============
+
+async def check_deadlines(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Проверяет дедлайны и шлёт уведомления за 3ч и в момент дедлайна."""
+    now = datetime.now()
+    tasks = db.get_tasks_for_deadline_check()
+    for task in tasks:
+        if not task.assignee_id:
+            continue
+        assignee_tg = db.get_assignee_telegram_id(task.assignee_id)
+        if not assignee_tg:
+            continue
+        deadline = task.deadline
+        if isinstance(deadline, str):
+            try:
+                deadline = datetime.fromisoformat(deadline)
+            except (ValueError, TypeError):
+                continue
+        delta = deadline - now
+        delta_sec = delta.total_seconds()
+        # За 3 часа (окно 3ч — 2ч45м, проверка каждые 10 мин)
+        if 10800 >= delta_sec > 9900 and not db.deadline_notification_sent(task.id, "3h_before"):
+            try:
+                await context.bot.send_message(
+                    chat_id=assignee_tg,
+                    text=f"⏰ *Напоминание:* до дедлайна задачи #{task.id} (*{task.title}*) осталось ~3 часа!\n"
+                         f"Дедлайн: {deadline.strftime('%d.%m.%Y %H:%M')}",
+                    parse_mode="Markdown"
+                )
+                db.mark_deadline_notification_sent(task.id, "3h_before")
+            except Exception as e:
+                logger.warning(f"Deadline 3h notify failed task {task.id}: {e}")
+        # В момент дедлайна (от 2 мин до дедлайна до 10 мин после)
+        elif -600 <= delta_sec <= 120 and not db.deadline_notification_sent(task.id, "deadline"):
+            try:
+                await context.bot.send_message(
+                    chat_id=assignee_tg,
+                    text=f"🔔 *Дедлайн!* Задача #{task.id} (*{task.title}*) — время вышло.\n"
+                         f"Дедлайн был: {deadline.strftime('%d.%m.%Y %H:%M')}",
+                    parse_mode="Markdown"
+                )
+                db.mark_deadline_notification_sent(task.id, "deadline")
+            except Exception as e:
+                logger.warning(f"Deadline at-time notify failed task {task.id}: {e}")
+
+
 # ============== Set role (Admin) ==============
 
 async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -693,20 +809,40 @@ async def cmd_setrole(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if len(args) < 2:
         await update.message.reply_text(
             "Используй: /setrole <user_id> <role>\n"
-            "Роли: smm_manager, designer, head_of_design\n"
+            "Роли: CMM, Дизайнер, Глава дизайна\n"
             "Пример: /setrole 123456789 designer"
         )
         return
+    _role_map = {"smm": UserRole.SMM_MANAGER, "cmm": UserRole.SMM_MANAGER, "смм": UserRole.SMM_MANAGER,
+                 "designer": UserRole.DESIGNER, "дизайнер": UserRole.DESIGNER,
+                 "head": UserRole.HEAD_OF_DESIGN, "глава": UserRole.HEAD_OF_DESIGN}
     try:
         telegram_id = int(args[0])
-        role_str = args[1].lower()
-        role = UserRole(role_str)
+        role_str = args[1].lower().strip()
+        role = _role_map.get(role_str) or UserRole(role_str)
     except (ValueError, KeyError):
-        await update.message.reply_text("Invalid role. Use: smm_manager, designer, head_of_design")
+        await update.message.reply_text("Роли: smm/cmm, designer, head/глава")
         return
     db.ensure_user(telegram_id, None, "Unknown")
     db.set_user_role(telegram_id, role)
     await update.message.reply_text(f"✅ Role {role.value} assigned to user {telegram_id}.")
+
+
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: список пользователей в формате username — role."""
+    if update.effective_user and update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ Только админ")
+        return
+    users = db.get_all_users()
+    if not users:
+        await update.message.reply_text("Пользователей пока нет.")
+        return
+    lines = []
+    for u in users:
+        username = f"@{u.username}" if u.username else str(u.telegram_id)
+        role = u.role.value if u.role else "—"
+        lines.append(f"{username} — {role}")
+    await update.message.reply_text("👥 *Пользователи:*\n\n" + "\n".join(lines), parse_mode="Markdown")
 
 
 # ============== Main ==============
@@ -760,6 +896,13 @@ def main() -> None:
     application.add_handler(CommandHandler("mytasks", cmd_mytasks))
     application.add_handler(CommandHandler("canceltask", cmd_canceltask))
     application.add_handler(CommandHandler("setrole", cmd_setrole))
+    application.add_handler(CommandHandler("users", cmd_users))
+
+    # Дедлайны: проверка каждые 10 минут (требует python-telegram-bot[job-queue])
+    if application.job_queue:
+        application.job_queue.run_repeating(check_deadlines, interval=600, first=60)
+    else:
+        logger.warning("JobQueue не доступен. Установите: pip install 'python-telegram-bot[job-queue]'")
 
     # Callbacks
     application.add_handler(CallbackQueryHandler(callback_take_task, pattern=r"^take_\d+$"))

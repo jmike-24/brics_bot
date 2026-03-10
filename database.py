@@ -12,18 +12,18 @@ from enum import Enum
 
 
 class TaskStatus(str, Enum):
-    NEW = "New"
-    IN_PROGRESS = "In Progress"
-    ON_REVIEW = "On Review"
-    REVISION = "Revision"
-    DONE = "Done"
+    NEW = "новые"
+    IN_PROGRESS = "в процессе"
+    ON_REVIEW = "отправлено на проверку"
+    REVISION = "проверка"
+    DONE = "сделано"
     CANCELLED = "Cancelled"
 
 
 class UserRole(str, Enum):
-    SMM_MANAGER = "smm_manager"
-    DESIGNER = "designer"
-    HEAD_OF_DESIGN = "head_of_design"
+    SMM_MANAGER = "СММ"
+    DESIGNER = "Дизайнер"
+    HEAD_OF_DESIGN = "Глава дизайна"
 
 
 @dataclass
@@ -110,6 +110,13 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_deadline ON tasks(deadline)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS deadline_notifications (
+                    task_id INTEGER, notification_type TEXT,
+                    PRIMARY KEY (task_id, notification_type),
+                    FOREIGN KEY (task_id) REFERENCES tasks(id)
+                )
+            """)
             conn.commit()
 
     def ensure_user(self, telegram_id: int, username: Optional[str], full_name: str) -> int:
@@ -142,17 +149,22 @@ class Database:
             conn.commit()
             return conn.total_changes > 0
 
+    def _parse_role(self, role_str: Optional[str]) -> Optional[UserRole]:
+        if not role_str:
+            return None
+        try:
+            return UserRole(role_str)
+        except ValueError:
+            legacy = {"smm_manager": UserRole.SMM_MANAGER, "designer": UserRole.DESIGNER,
+                      "head_of_design": UserRole.HEAD_OF_DESIGN}
+            return legacy.get(role_str.lower())
+
     def get_user_role(self, telegram_id: int) -> Optional[UserRole]:
         with self._get_connection() as conn:
             row = conn.execute(
                 "SELECT role FROM users WHERE telegram_id = ?", (telegram_id,)
             ).fetchone()
-            if row and row["role"]:
-                try:
-                    return UserRole(row["role"])
-                except ValueError:
-                    return None
-            return None
+            return self._parse_role(row["role"]) if row and row["role"] else None
 
     def get_user_by_id(self, user_id: int) -> Optional[User]:
         with self._get_connection() as conn:
@@ -161,7 +173,7 @@ class Database:
                 (user_id,)
             ).fetchone()
             if row:
-                role = UserRole(row["role"]) if row["role"] else None
+                role = self._parse_role(row["role"])
                 return User(
                     id=row["id"],
                     telegram_id=row["telegram_id"],
@@ -178,7 +190,7 @@ class Database:
                 (telegram_id,)
             ).fetchone()
             if row:
-                role = UserRole(row["role"]) if row["role"] else None
+                role = self._parse_role(row["role"])
                 return User(
                     id=row["id"],
                     telegram_id=row["telegram_id"],
@@ -200,7 +212,7 @@ class Database:
                     telegram_id=r["telegram_id"],
                     username=r["username"],
                     full_name=r["full_name"],
-                    role=UserRole(r["role"])
+                    role=self._parse_role(r["role"])
                 )
                 for r in rows
             ]
@@ -218,7 +230,7 @@ class Database:
                     telegram_id=r["telegram_id"],
                     username=r["username"],
                     full_name=r["full_name"],
-                    role=UserRole(r["role"])
+                    role=self._parse_role(r["role"])
                 )
                 for r in rows
             ]
@@ -247,6 +259,15 @@ class Database:
                 return self._row_to_task(row)
             return None
 
+    def _parse_status(self, status_str: str) -> TaskStatus:
+        try:
+            return TaskStatus(status_str)
+        except ValueError:
+            legacy = {"New": TaskStatus.NEW, "In Progress": TaskStatus.IN_PROGRESS,
+                      "On Review": TaskStatus.ON_REVIEW, "Revision": TaskStatus.REVISION,
+                      "Done": TaskStatus.DONE}
+            return legacy.get(status_str, TaskStatus.NEW)
+
     def _row_to_task(self, row: sqlite3.Row) -> Task:
         deadline = datetime.fromisoformat(row["deadline"]) if isinstance(row["deadline"], str) else row["deadline"]
         created = datetime.fromisoformat(row["created_at"]) if isinstance(row["created_at"], str) else row["created_at"]
@@ -259,7 +280,7 @@ class Database:
             brief_link=row["brief_link"],
             creator_id=row["creator_id"],
             assignee_id=row["assignee_id"],
-            status=TaskStatus(row["status"]),
+            status=self._parse_status(row["status"] or "New"),
             result_link=row["result_link"],
             revision_comment=row["revision_comment"],
             created_at=created,
@@ -391,3 +412,46 @@ class Database:
                 "SELECT telegram_id FROM users WHERE id = ?", (assignee_id,)
             ).fetchone()
             return row["telegram_id"] if row else None
+
+    def get_all_users(self) -> list[User]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, telegram_id, username, full_name, role FROM users ORDER BY id"
+            ).fetchall()
+            return [
+                User(
+                    id=r["id"],
+                    telegram_id=r["telegram_id"],
+                    username=r["username"],
+                    full_name=r["full_name"],
+                    role=self._parse_role(r["role"])
+                )
+                for r in rows
+            ]
+
+    def get_tasks_for_deadline_check(self) -> list[Task]:
+        """Tasks with assignee, active status, for deadline notifications."""
+        with self._get_connection() as conn:
+            statuses = (TaskStatus.IN_PROGRESS.value, TaskStatus.REVISION.value, TaskStatus.ON_REVIEW.value)
+            placeholders = ",".join("?" * len(statuses))
+            rows = conn.execute(
+                f"SELECT * FROM tasks WHERE assignee_id IS NOT NULL AND status IN ({placeholders}) ORDER BY deadline ASC",
+                statuses
+            ).fetchall()
+            return [self._row_to_task(r) for r in rows]
+
+    def deadline_notification_sent(self, task_id: int, notification_type: str) -> bool:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM deadline_notifications WHERE task_id = ? AND notification_type = ?",
+                (task_id, notification_type)
+            ).fetchone()
+            return row is not None
+
+    def mark_deadline_notification_sent(self, task_id: int, notification_type: str) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO deadline_notifications (task_id, notification_type) VALUES (?, ?)",
+                (task_id, notification_type)
+            )
+            conn.commit()
